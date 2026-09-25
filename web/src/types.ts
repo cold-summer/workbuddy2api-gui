@@ -129,6 +129,43 @@ export interface AccountsResponse {
   summary?: GatewayStatus
 }
 
+/** 完整凭证导出单项（保真保留 auths 文件完整结构，可直接导入/迁移）。 */
+export interface CredentialExportItem {
+  file_name: string
+  uid: string
+  raw: Record<string, unknown>
+}
+
+/** 账号清单导出单项（不含敏感 token，供查看/记录/分析）。 */
+export interface AccountInventoryItem {
+  uid: string
+  nickname: string
+  realm: string
+  domain: string
+  status: string
+  cooling: boolean
+  cool_kind?: string
+  disabled: boolean
+  reason?: string
+  credits: number
+  live_credits?: number
+  success_count: number
+  err_total: number
+  last_success?: string
+  last_err?: string
+  expires_at: number
+  expired: boolean
+  needs_refresh: boolean
+  file_name: string
+}
+
+export interface ExportResponse<T> {
+  ok: boolean
+  count: number
+  format: 'credentials' | 'inventory'
+  exported: T[]
+}
+
 export interface OpResult {
   uid: string
   action: string

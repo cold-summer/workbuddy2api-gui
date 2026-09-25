@@ -57,6 +57,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/accounts/{uid}", s.handleAccountDetail)
 	mux.HandleFunc("DELETE /api/accounts/{uid}", s.handleAccountDelete)
 	mux.HandleFunc("POST /api/accounts/import", s.handleAccountImport)
+	mux.HandleFunc("POST /api/accounts/export/credentials", s.handleAccountExportCredentials)
+	mux.HandleFunc("POST /api/accounts/export/inventory", s.handleAccountExportInventory)
 	mux.HandleFunc("POST /api/accounts/{uid}/checkin", s.handleAccountCheckin)
 	mux.HandleFunc("POST /api/accounts/{uid}/refresh", s.handleAccountRefresh)
 	mux.HandleFunc("POST /api/accounts/{uid}/travel", s.handleAccountTravel)
@@ -178,6 +180,47 @@ func (s *Server) handleAccountImport(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, res)
+}
+
+// exportBody 批量导出请求体；uids 为空表示导出全部账号。
+type exportBody struct {
+	UIDs []string `json:"uids"`
+}
+
+func (s *Server) handleAccountExportCredentials(w http.ResponseWriter, r *http.Request) {
+	var in exportBody
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	items, err := s.svc.ExportCredentials(in.UIDs)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"count":   len(items),
+		"format":  "credentials",
+		"exported": items,
+	})
+}
+
+func (s *Server) handleAccountExportInventory(w http.ResponseWriter, r *http.Request) {
+	var in exportBody
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	items, err := s.svc.ExportInventory(r.Context(), in.UIDs)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"count":   len(items),
+		"format":  "inventory",
+		"exported": items,
+	})
 }
 
 func (s *Server) handleAccountCheckin(w http.ResponseWriter, r *http.Request) {

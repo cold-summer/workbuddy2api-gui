@@ -4,6 +4,7 @@ package ops
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -291,7 +292,11 @@ func (s *Service) ensureDangerous() error {
 // 网关不可达时不报错：磁盘侧账号仍返回，状态标记为 unknown。
 func (s *Service) Accounts(ctx context.Context) ([]AccountView, *gateway.Status, []string, error) {
 	diskAccounts, fileIssues := s.store.List()
-	status, gwErr := s.gw.Status(ctx)
+	var status *gateway.Status
+	var gwErr error
+	if s.gw != nil {
+		status, gwErr = s.gw.Status(ctx)
+	}
 
 	byUID := map[string]*AccountView{}
 	for _, a := range diskAccounts {
@@ -1010,4 +1015,124 @@ func baseName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// ── 账号导出（批量） ─────────────────────────────────────
+
+// realmFromDomain 从账号 domain 反推域：含 workbuddy.ai 为 global，其余为 cn。
+// 与 realmOfAccount 同一判定口径，供清单导出等不含 authstore.Account 的场景复用。
+func realmFromDomain(domain string) string {
+	if strings.Contains(strings.ToLower(domain), "workbuddy.ai") {
+		return "global"
+	}
+	return "cn"
+}
+
+// CredentialExportItem 单条凭证导出：文件名 + 原始凭证内容。
+// Raw 保留 auths 目录文件全部字段（realm / enterpriseId 等），迁移后可直接复用。
+type CredentialExportItem struct {
+	FileName string         `json:"file_name"`
+	UID      string         `json:"uid"`
+	Raw      map[string]any `json:"raw"`
+}
+
+// ExportCredentials 批量导出账号完整凭证（读 auths 目录原始文件，保真迁移）。
+// uids 为空 = 全部账号；非空 = 仅导这些 uid。
+// 凭证含敏感 token：受只读模式限制（read_only 下禁止导出，与签到/刷新等同级）。
+func (s *Service) ExportCredentials(uids []string) ([]CredentialExportItem, error) {
+	if err := s.ensureWritable(); err != nil {
+		return nil, err
+	}
+	accounts, _ := s.store.List()
+	sel := make(map[string]bool, len(uids))
+	for _, u := range uids {
+		sel[u] = true
+	}
+	out := make([]CredentialExportItem, 0, len(accounts))
+	for _, a := range accounts {
+		if len(sel) > 0 && !sel[a.UID] {
+			continue
+		}
+		if a.FilePath == "" {
+			continue
+		}
+		raw, err := os.ReadFile(a.FilePath)
+		if err != nil {
+			continue // 读不到的文件跳过，不阻断整批导出
+		}
+		var doc map[string]any
+		if json.Unmarshal(raw, &doc) != nil {
+			continue
+		}
+		out = append(out, CredentialExportItem{
+			FileName: baseName(a.FilePath),
+			UID:      a.UID,
+			Raw:      doc,
+		})
+	}
+	return out, nil
+}
+
+// AccountInventoryItem 账号清单导出条目（不含 token，供查看/分析/记录）。
+type AccountInventoryItem struct {
+	UID          string    `json:"uid"`
+	Nickname     string    `json:"nickname"`
+	Realm        string    `json:"realm"`
+	Domain       string    `json:"domain"`
+	Status       string    `json:"status"`
+	Cooling      bool      `json:"cooling"`
+	CoolKind     string    `json:"cool_kind,omitempty"`
+	Disabled     bool      `json:"disabled"`
+	Reason       string    `json:"reason,omitempty"`
+	Credits      int64     `json:"credits"`
+	LiveCredits  *int64    `json:"live_credits,omitempty"`
+	SuccessCount int64     `json:"success_count"`
+	ErrTotal     int64     `json:"err_total"`
+	LastSuccess  time.Time `json:"last_success,omitempty"`
+	LastErr      time.Time `json:"last_err,omitempty"`
+	ExpiresAt    int64     `json:"expires_at"`
+	Expired      bool      `json:"expired"`
+	NeedsRefresh bool      `json:"needs_refresh"`
+	FileName     string    `json:"file_name"`
+}
+
+// ExportInventory 批量导出账号清单（不含 token），基于 Accounts 的合并视图。
+// uids 为空 = 全部账号；非空 = 仅导这些 uid。清单不含敏感字段，只读模式可用。
+func (s *Service) ExportInventory(ctx context.Context, uids []string) ([]AccountInventoryItem, error) {
+	views, _, _, err := s.Accounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sel := make(map[string]bool, len(uids))
+	for _, u := range uids {
+		sel[u] = true
+	}
+	out := make([]AccountInventoryItem, 0, len(views))
+	for _, v := range views {
+		if len(sel) > 0 && !sel[v.UID] {
+			continue
+		}
+		out = append(out, AccountInventoryItem{
+			UID:          v.UID,
+			Nickname:     v.Nickname,
+			Realm:        realmFromDomain(v.Domain),
+			Domain:       v.Domain,
+			Status:       v.Status,
+			Cooling:      v.Cooling,
+			CoolKind:     v.CoolKind,
+			Disabled:     v.Disabled,
+			Reason:       v.Reason,
+			Credits:      v.GatewayCredits,
+			LiveCredits:  v.LiveCredits,
+			SuccessCount: v.SuccessCount,
+			ErrTotal:     v.ErrTotal,
+			LastSuccess:  v.LastSuccessTime,
+			LastErr:      v.LastErrTime,
+			ExpiresAt:    v.ExpiresAt,
+			Expired:      v.Expired,
+			NeedsRefresh: v.NeedsRefresh,
+			FileName:     v.FileName,
+		})
+	}
+	return out, nil
 }

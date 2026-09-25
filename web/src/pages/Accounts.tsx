@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
-import type { Account, AccountProfile, SessionInfo } from '../types'
+import type { Account, AccountInventoryItem, AccountProfile, SessionInfo } from '../types'
 import {
   Alert,
   Badge,
@@ -39,6 +39,7 @@ export default function Accounts({ session }: { session: SessionInfo }) {
   const [detailUid, setDetailUid] = useState<string | null>(null)
   const [taskId, setTaskId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
+  const [showExport, setShowExport] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Account | null>(null)
   const [deleting, setDeleting] = useState(false)
 
@@ -190,6 +191,9 @@ export default function Accounts({ session }: { session: SessionInfo }) {
           <button className="btn" onClick={() => setShowImport(true)} disabled={writeDisabled} title={writeDisabled ? '只读模式' : ''}>
             📥 导入凭证
           </button>
+          <button className="btn" onClick={() => setShowExport(true)} disabled={accounts.length === 0} title="导出账号凭证或清单">
+            📤 导出账号
+          </button>
           <Link className="btn btn-primary" to="/login">
             ➕ 添加账号
           </Link>
@@ -241,6 +245,9 @@ export default function Accounts({ session }: { session: SessionInfo }) {
           </button>
           <button className="btn" onClick={() => void runBatch('credits')} disabled={accounts.length === 0}>
             💰 批量查积分
+          </button>
+          <button className="btn" onClick={() => setShowExport(true)} disabled={accounts.length === 0} title={selected.size > 0 ? `导出已选 ${selected.size} 个账号` : '导出全部账号'}>
+            📤 {selected.size > 0 ? `导出已选 (${selected.size})` : '导出账号'}
           </button>
           {selected.size > 0 && (
             <button className="btn btn-ghost" onClick={() => setSelected(new Set())}>
@@ -470,6 +477,15 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         />
       )}
 
+      {showExport && (
+        <ExportDialog
+          accounts={accounts}
+          selectedUIDs={targetUIDs}
+          readOnly={session.read_only}
+          onClose={() => setShowExport(false)}
+        />
+      )}
+
       {deleteTarget && (
         <ConfirmDialog
           title="删除账号凭证"
@@ -685,3 +701,286 @@ function ImportDialog({
     </Modal>
   )
 }
+
+/** downloadBlob 辅助下载文件到浏览器本地。 */
+function downloadBlob(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+/** inventoryToCSV 将账号清单转为 CSV 字符串（带 UTF-8 BOM，Excel 打开不乱码）。 */
+function inventoryToCSV(items: AccountInventoryItem[]): string {
+  const headers = [
+    'UID',
+    '昵称',
+    '域',
+    '状态',
+    '冷却中',
+    '冷却原因',
+    '网关积分',
+    '实时积分',
+    '成功次数',
+    '失败次数',
+    'Token过期时刻',
+    'Token需刷新',
+    '凭证文件',
+  ]
+  const rows = items.map((i) => [
+    i.uid,
+    `"${(i.nickname || '').replace(/"/g, '""')}"`,
+    i.realm,
+    i.status,
+    i.cooling ? '是' : '否',
+    `"${(i.reason || '').replace(/"/g, '""')}"`,
+    i.credits,
+    i.live_credits ?? '',
+    i.success_count,
+    i.err_total,
+    i.expires_at ? new Date(i.expires_at * 1000).toLocaleString('zh-CN') : '',
+    i.needs_refresh ? '是' : '否',
+    i.file_name,
+  ])
+  return '﻿' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
+}
+
+type ExportMode = 'all_bundle' | 'credentials' | 'inventory_csv' | 'inventory_json'
+
+/** ExportDialog 批量导出账号弹窗：支持完整凭证 JSON、状态清单 CSV/JSON、两者打包。 */
+function ExportDialog({
+  accounts,
+  selectedUIDs,
+  readOnly,
+  onClose,
+}: {
+  accounts: Account[]
+  selectedUIDs: string[]
+  readOnly: boolean
+  onClose: () => void
+}) {
+  const hasSelection = selectedUIDs.length > 0
+  const [scope, setScope] = useState<'selected' | 'all'>(hasSelection ? 'selected' : 'all')
+  const [mode, setMode] = useState<ExportMode>('all_bundle')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [preview, setPreview] = useState<string>('')
+  const [copied, setCopied] = useState(false)
+  const [exportCount, setExportCount] = useState<number>(0)
+
+  const effectiveUIDs = useMemo(
+    () => (scope === 'selected' && hasSelection ? selectedUIDs : []),
+    [scope, hasSelection, selectedUIDs],
+  )
+
+  const count = effectiveUIDs.length > 0 ? effectiveUIDs.length : accounts.length
+
+  const doExport = async () => {
+    setError(null)
+    setBusy(true)
+    setCopied(false)
+    try {
+      const nowStr = new Date().toISOString().slice(0, 10)
+      if (mode === 'all_bundle') {
+        // 两者都要：分别调后端两个接口打包
+        const [credRes, invRes] = await Promise.all([
+          readOnly ? Promise.resolve({ exported: [] }) : api.exportCredentials(effectiveUIDs),
+          api.exportInventory(effectiveUIDs),
+        ])
+        const bundle = {
+          exported_at: new Date().toISOString(),
+          total_accounts: invRes.exported.length,
+          inventory: invRes.exported,
+          credentials: credRes.exported,
+        }
+        const text = JSON.stringify(bundle, null, 2)
+        setPreview(text)
+        setExportCount(invRes.exported.length)
+        downloadBlob(`workbuddy-accounts-bundle-${nowStr}.json`, text, 'application/json;charset=utf-8')
+      } else if (mode === 'credentials') {
+        if (readOnly) {
+          setError('服务端已开启只读模式，凭证导出已禁用')
+          return
+        }
+        const res = await api.exportCredentials(effectiveUIDs)
+        const text = JSON.stringify(res.exported, null, 2)
+        setPreview(text)
+        setExportCount(res.exported.length)
+        downloadBlob(`workbuddy-credentials-${nowStr}.json`, text, 'application/json;charset=utf-8')
+      } else if (mode === 'inventory_csv') {
+        const res = await api.exportInventory(effectiveUIDs)
+        const csv = inventoryToCSV(res.exported)
+        setPreview(csv)
+        setExportCount(res.exported.length)
+        downloadBlob(`workbuddy-accounts-${nowStr}.csv`, csv, 'text/csv;charset=utf-8')
+      } else {
+        const res = await api.exportInventory(effectiveUIDs)
+        const text = JSON.stringify(res.exported, null, 2)
+        setPreview(text)
+        setExportCount(res.exported.length)
+        downloadBlob(`workbuddy-accounts-${nowStr}.json`, text, 'application/json;charset=utf-8')
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '导出失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyPreview = async () => {
+    if (!preview) return
+    try {
+      await navigator.clipboard.writeText(preview)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setError('复制失败，请手动选择复制')
+    }
+  }
+
+  return (
+    <Modal
+      title="批量导出账号"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>
+            关闭
+          </button>
+          {preview && (
+            <button className="btn" onClick={() => void copyPreview()} disabled={busy}>
+              {copied ? '✅ 已复制' : '📋 复制内容'}
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={() => void doExport()} disabled={busy || count === 0}>
+            {busy ? <Spinner /> : '📥'} 下载导出文件 ({count})
+          </button>
+        </>
+      }
+    >
+      {error && <Alert kind="error">{error}</Alert>}
+      {readOnly && (mode === 'all_bundle' || mode === 'credentials') && (
+        <Alert kind="warn">当前服务端为只读模式，完整凭证（含 Token）已被禁用导出，但账号清单（无 Token）仍可正常导出。</Alert>
+      )}
+
+      {/* 导出范围 */}
+      <div className="field">
+        <label>导出范围</label>
+        <div style={{ display: 'flex', gap: 16, marginTop: 4 }}>
+          {hasSelection && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="radio"
+                name="scope"
+                checked={scope === 'selected'}
+                onChange={() => setScope('selected')}
+              />
+              仅已选账号（{selectedUIDs.length} 个）
+            </label>
+          )}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="scope"
+              checked={scope === 'all'}
+              onChange={() => setScope('all')}
+            />
+            全部账号（{accounts.length} 个）
+          </label>
+        </div>
+      </div>
+
+      {/* 导出格式 */}
+      <div className="field">
+        <label>导出格式</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="mode"
+              checked={mode === 'all_bundle'}
+              onChange={() => {
+                setMode('all_bundle')
+                setPreview('')
+              }}
+            />
+            <div>
+              <strong>📦 打包导出（凭证 + 清单）</strong>
+              <div className="desc">包含完整凭证（供迁移恢复）和状态清单（供查看记录）的 JSON 归档包。</div>
+            </div>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="mode"
+              checked={mode === 'credentials'}
+              onChange={() => {
+                setMode('credentials')
+                setPreview('')
+              }}
+            />
+            <div>
+              <strong>🔑 仅完整凭证（JSON）</strong>
+              <div className="desc">
+                包含 accessToken、refreshToken 等完整凭证，格式与「导入凭证」兼容，可直接分发到其他网关。
+              </div>
+            </div>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="mode"
+              checked={mode === 'inventory_csv'}
+              onChange={() => {
+                setMode('inventory_csv')
+                setPreview('')
+              }}
+            />
+            <div>
+              <strong>📊 账号清单（CSV 表格）</strong>
+              <div className="desc">适合用 Excel 打开查看：包含 UID、昵称、域、状态、积分、冷却信息等，不含敏感 Token。</div>
+            </div>
+          </label>
+
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="radio"
+              name="mode"
+              checked={mode === 'inventory_json'}
+              onChange={() => {
+                setMode('inventory_json')
+                setPreview('')
+              }}
+            />
+            <div>
+              <strong>📄 账号清单（JSON）</strong>
+              <div className="desc">结构化账号状态清单，适合脚本或程序二次分析，不含敏感 Token。</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      {/* 导出结果预览 */}
+      {preview && (
+        <div className="field">
+          <label>已成功导出 {exportCount} 个账号（预览如下，文件已触发浏览器下载）：</label>
+          <textarea
+            rows={8}
+            readOnly
+            value={preview.slice(0, 5000) + (preview.length > 5000 ? '\n... (内容过长，仅展示前 5000 字符)' : '')}
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
+        </div>
+      )}
+    </Modal>
+  )
+}
+

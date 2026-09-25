@@ -1,11 +1,14 @@
 // api.ts 后端接口封装。所有请求携带 Cookie（同源），并统一处理 401 → 跳登录。
 import type {
+  AccountInventoryItem,
   AccountProfile,
   AccountsResponse,
   ChatDelta,
   ChatMessage,
   ConfigResponse,
+  CredentialExportItem,
   Credits,
+  ExportResponse,
   ModelsResponse,
   OpResult,
   Overview,
@@ -97,6 +100,11 @@ export const api = {
   deleteAccount: (uid: string) =>
     del<{ ok: boolean; message: string }>(`/api/accounts/${encodeURIComponent(uid)}?confirm=${encodeURIComponent(uid)}`),
   importAccount: (payload: Record<string, unknown>) => post<OpResult>('/api/accounts/import', payload),
+
+  exportCredentials: (uids: string[]) =>
+    post<ExportResponse<CredentialExportItem>>('/api/accounts/export/credentials', { uids }),
+  exportInventory: (uids: string[]) =>
+    post<ExportResponse<AccountInventoryItem>>('/api/accounts/export/inventory', { uids }),
 
   accountCheckin: (uid: string) => post<OpResult>(`/api/accounts/${encodeURIComponent(uid)}/checkin`),
   accountRefresh: (uid: string) => post<OpResult>(`/api/accounts/${encodeURIComponent(uid)}/refresh`),
